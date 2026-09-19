@@ -1,0 +1,34 @@
+name: Initialize Repository Governance
+
+on:
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: "Optional OWNER/REPOSITORY target; defaults to this repository"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  sync-governance:
+    runs-on: ubuntu-latest
+    env:
+      GH_REPO: ${{ inputs.repository || github.repository }}
+      GH_TOKEN: ${{ secrets.GH_PAT }}
+
+    steps:
+      - name: Checkout governance configuration
+        uses: actions/checkout@v4
+
+      - name: Validate administrator token
+        run: |
+          set -euo pipefail
+          if [[ -z "$GH_TOKEN" ]]; then
+            echo "GH_PAT is not configured. Add an administrator token as a repository or organization secret." >&2
+            exit 1
+          fi
+
+      - name: Synchronize labels and rulesets
+        run: bash scripts/sync-repository-governance.sh
