@@ -1,0 +1,97 @@
+name: Prod Version Bump
+
+on:
+  pull_request:
+    types:
+      - closed
+    branches:
+      - prod
+
+permissions:
+  contents: write
+
+concurrency:
+  group: versioning-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  bump-prod:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout merged commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Determine production version
+        id: version
+        env:
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          set -euo pipefail
+
+          git fetch origin release prod
+
+          BUMP=""
+          if grep -q '"release:hotfix"' <<< "$LABELS"; then
+            BUMP="patch"
+          elif grep -q '"release:minor"\|"release:major"' <<< "$LABELS"; then
+            echo "Only release:hotfix is valid for a hotfix PR targeting prod" >&2
+            exit 1
+          fi
+
+          if [[ "$BUMP" == "patch" ]]; then
+            PROD_TAG=$(git tag --merged origin/prod --sort=-v:refname | head -n 1)
+            if [[ -z "$PROD_TAG" || ! "$PROD_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "No semantic version tag is reachable from prod for the hotfix" >&2
+              exit 1
+            fi
+
+            CLEAN_VERSION=${PROD_TAG#v}
+            IFS='.' read -r MAJOR MINOR PATCH <<< "$CLEAN_VERSION"
+            PATCH=$((PATCH + 1))
+
+            echo "tag=v$MAJOR.$MINOR.$PATCH" >> "$GITHUB_OUTPUT"
+            echo "create_tag=true" >> "$GITHUB_OUTPUT"
+          else
+            RELEASE_TAG=$(git tag --points-at origin/release --sort=-v:refname | head -n 1)
+            if [[ -z "$RELEASE_TAG" || ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "No semantic version tag exists on the release tip" >&2
+              exit 1
+            fi
+
+            echo "Reusing release tag $RELEASE_TAG for production promotion"
+            echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+            echo "create_tag=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish production version tag
+        if: steps.version.outputs.create_tag == 'true'
+        env:
+          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          NEW_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "$NEW_TAG" "$MERGE_SHA"
+          git push origin "$NEW_TAG"
+
+      - name: Cascade production back to release and dev
+        run: |
+          set -euo pipefail
+
+          git fetch origin dev release prod
+
+          git checkout -B release origin/release
+          git merge origin/prod -m "chore: mergeback prod to release [skip ci]"
+          git push origin release
+
+          git checkout -B dev origin/dev
+          git merge origin/release -m "chore: cascade mergeback release to dev [skip ci]"
+          git push origin dev
